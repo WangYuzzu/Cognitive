@@ -51,13 +51,13 @@ class OpenAIAPI:
     async def call_api(self, prompt: str, max_retries: int = 3) -> Optional[str]:
         """异步调用OpenAI API"""
         data = {
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-4o",
             "messages": [
                 {"role": "system", "content": "You are a professional Chinese education expert."},
                 {"role": "user", "content": prompt}
             ],
             # 增加随机性参数
-            "temperature": 0.7,
+            "temperature": 0.7
         }
 
         for attempt in range(max_retries):

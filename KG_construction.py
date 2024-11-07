@@ -103,7 +103,7 @@ class KnowledgeGraphGenerator:
     async def call_llm_api(self, prompt: str, max_retries: int = 3) -> Optional[str]:
         """异步调用OpenAI API"""
         data = {
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-4o",
             "messages": [
                 {"role": "system", "content": "You are a professional knowledge graph expert."},
                 {"role": "user", "content": prompt}
