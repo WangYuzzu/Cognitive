@@ -5,6 +5,7 @@ import aiohttp
 from typing import Dict, List, Any
 import time
 from hashlib import md5
+from datetime import datetime
 
 
 class StudentInfoGenerator:
@@ -108,7 +109,7 @@ class StudentInfoGenerator:
                 {"role": "system", "content": "You are a professional Chinese education expert."},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.7
+            "temperature": 0.8
         }
 
         async with aiohttp.ClientSession() as session:
@@ -149,6 +150,16 @@ class StudentInfoGenerator:
 
     def save_to_file(self, students: List[Dict], filename: str = "student_infos.json"):
         """保存学生信息到文件"""
+        # 获取当前时间
+        now = datetime.now()
+        # 格式化日期部分为 YYYYMMDD
+        date_str = now.strftime("%Y%m%d")
+        # 计算今天已过去的秒数
+        seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+        # 拼接成所需格式
+        formatted_time = f"{date_str}_{seconds_since_midnight}"
+        filename = filename.split(".")[0] + '_' + formatted_time + '.json'
+
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump({"students": students}, f, ensure_ascii=False, indent=2)
 
@@ -158,7 +169,7 @@ async def main():
     generator = StudentInfoGenerator(api_key)
 
     # 生成100个不重复的学生信息
-    students = await generator.generate_student_infos(total_students=100, batch_size=5)
+    students = await generator.generate_student_infos(total_students=1000, batch_size=8)
 
     # 保存结果
     generator.save_to_file(students)
