@@ -1,4 +1,4 @@
-# KG_construction.py
+# KG_construction_NoURL.py
 from typing import List, Dict, Set, Optional
 from dataclasses import dataclass
 import json
@@ -6,11 +6,10 @@ import networkx as nx
 from collections import deque
 import asyncio
 
-from fastapi.openapi.models import APIKey
 from tqdm import tqdm
 from openai import OpenAI
 import time
-from datetime import datetime
+
 
 
 @dataclass
