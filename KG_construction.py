@@ -8,7 +8,6 @@ import asyncio
 from tqdm import tqdm
 import aiohttp
 import time
-from datetime import datetime
 
 
 @dataclass
