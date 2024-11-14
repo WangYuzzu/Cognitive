@@ -5,8 +5,10 @@ import json
 import networkx as nx
 from collections import deque
 import asyncio
+
+from fastapi.openapi.models import APIKey
 from tqdm import tqdm
-import aiohttp
+from openai import OpenAI
 import time
 from datetime import datetime
 
@@ -38,12 +40,7 @@ class KnowledgeGraphGenerator:
         self.analyzed_entities = set()
 
         # API配置
-        self.api_key = api_key
-        self.base_url = "https://api.gptapi.us/v1/chat/completions"
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
+        self.client = OpenAI(api_key=api_key, base_url='https://api.gptapi.us/v1/chat/completions')
         # 用于速率限制
         self.last_request_time = 0
         self.min_request_interval = 1
@@ -130,9 +127,9 @@ class KnowledgeGraphGenerator:
         raise ValueError("No valid JSON found in response")
 
     async def call_llm_api(self, prompt: str, max_retries: int = 3) -> Optional[str]:
-        """异步调用OpenAI API"""
+        """使用openai库调用API"""
         data = {
-            "model": "gpt-4o",
+            "model": "gpt-4",
             "messages": [
                 {"role": "system", "content": "You are a professional knowledge graph expert."},
                 {"role": "user", "content": prompt}
@@ -143,21 +140,16 @@ class KnowledgeGraphGenerator:
         for attempt in range(max_retries):
             try:
                 await self._wait_for_rate_limit()
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                            self.base_url,
-                            headers=self.headers,
-                            json=data
-                    ) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            content = result['choices'][0]['message']['content']
-                            return self._extract_json_from_text(content)
-                        else:
-                            error_detail = await response.text()
-                            print(f"API Error {response.status}: {error_detail}")
-                            if attempt == max_retries - 1:
-                                raise Exception(f"OpenAI API failed after {max_retries} attempts")
+
+                # 新版本OpenAI库
+                response = self.client.chat.completions.create(**data)
+                content = response.choices[0].message.content
+
+                # 或者旧版本
+                # response = await openai.ChatCompletion.create(**data)
+                # content = response['choices'][0]['message']['content']
+
+                return self._extract_json_from_text(content)
 
             except Exception as e:
                 print(f"Attempt {attempt + 1} failed: {str(e)}")
@@ -181,6 +173,7 @@ class KnowledgeGraphGenerator:
                 self.generate_entity_analysis_prompt(entities_to_analyze)
             )
             data = json.loads(response)
+            print(f'批量分析: {data}')
 
             results = {}
             for analysis in data["entity_analysis"]:
