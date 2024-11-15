@@ -23,10 +23,10 @@ class Quad:
 
 class KnowledgeGraphGenerator:
     def __init__(
-        self,
-        api_key: str,
-        load_from_state: bool = False,
-        state_file_prefix: str = 'kg_state'
+            self,
+            api_key: str,
+            load_from_state: bool = False,
+            state_file_prefix: str = 'kg_state'
     ):
         # 初始化变量
         self.graph = nx.MultiDiGraph()
@@ -50,33 +50,92 @@ class KnowledgeGraphGenerator:
 
         # 如果需要，从保存的状态加载
         if load_from_state:
-            self.load_graph(f'{state_file_prefix}_graph.json')
-            self.load_state(f'{state_file_prefix}_state.json')
+            self.load_graph(f'results/{state_file_prefix}_graph.json')
+            self.load_state(f'results/{state_file_prefix}_state.json')
 
     def generate_entity_analysis_prompt(self, entities: List[str]) -> str:
         """生成批量分析实体的prompt"""
-        return f"""作为AI领域的专家，请分析以下概念：{', '.join(entities)}
+        entity_descriptions = []
 
-        对每个概念进行分析，包括：
-        1. 领域关联度分析
-        2. 概念粒度分析
-        3. 传播必要性分析
+        # 生成每个实体的描述部分
+        for entity in entities:
+            entity_descriptions.append(f'"{entity}"：')
 
-        请按如下JSON格式返回：
+        # 将所有实体的描述部分合并
+        entities_analysis = "\n".join(entity_descriptions)
+
+        # 完整生成 prompt，加入 few-shot 示例
+        return f"""
+        作为AI领域的专家，请对以下概念进行批量分析：
+        {entities_analysis}
+
+        对于每个概念，请回答以下问题：
+
+        第一部分 - 领域关联度分析：
+        1. 这个概念是否属于AI领域？
+        2. 如果属于，这个概念与AI领域的关联程度是：
+           - 强关联（核心概念）
+           - 中度关联（相关概念）
+           - 弱关联（边缘概念）
+
+        第二部分 - 概念粒度分析：
+        1. 这个概念的粒度级别是：
+           - 大类概念（如"机器学习"）
+           - 子领域概念（如"监督学习"）
+           - 具体技术概念（如"决策树"）
+           - 技术细节（如"信息增益计算"）
+
+        第三部分 - 传播必要性分析：
+        1. 这个概念是否还需要进一步拆分和传播？
+        2. 如果不需要，原因是：
+           - 已经是最小粒度的知识点
+           - 过于技术细节
+           - 不够普遍重要
+           - 其他原因（请说明）
+
+        请严格按照以下JSON格式返回，不要包含任何其他内容，以下是回复示例：
         {{
             "entity_analysis": [
                 {{
-                    "entity": "概念名称",
-                    "is_ai_related": true/false,
-                    "relation_level": "strong/medium/weak",
-                    "granularity": "category/subdomain/technique/detail",
-                    "should_propagate": true/false,
-                    "stop_reason": "如果should_propagate为false，给出原因",
-                    "confidence": <0-1的置信度>
+                    "entity": "机器学习",
+                    "is_ai_related": true,
+                    "relation_level": "strong",
+                    "granularity": "category",
+                    "should_propagate": true,
+                    "stop_reason": "",
+                    "confidence": 0.95
+                }},
+                {{
+                    "entity": "随机森林",
+                    "is_ai_related": true,
+                    "relation_level": "medium",
+                    "granularity": "technique",
+                    "should_propagate": true,
+                    "stop_reason": "",
+                    "confidence": 0.88
+                }},
+                {{
+                    "entity": "线性代数",
+                    "is_ai_related": true,
+                    "relation_level": "weak",
+                    "granularity": "category",
+                    "should_propagate": false,
+                    "stop_reason": "属于边缘概念，不需要进一步传播",
+                    "confidence": 0.7
+                }},
+                {{
+                    "entity": "大数据处理",
+                    "is_ai_related": true,
+                    "relation_level": "strong",
+                    "granularity": "category",
+                    "should_propagate": true,
+                    "stop_reason": "",
+                    "confidence": 0.92
                 }},
                 ...
             ]
-        }}"""
+        }}
+        """
 
     def generate_expansion_prompt(self, entity: str) -> str:
         """生成用于实体扩展的prompt"""
@@ -132,7 +191,7 @@ class KnowledgeGraphGenerator:
         end = text.rfind('}')
         if start != -1 and end != -1:
             return text[start:end + 1]
-        raise ValueError("No valid JSON found in response")
+        raise ValueError(f"No valid JSON found in response, 对应text: {text}")
 
     async def call_llm_api(self, prompt: str, max_retries: int = 3) -> Optional[str]:
         """异步调用API"""
@@ -142,7 +201,7 @@ class KnowledgeGraphGenerator:
                 {"role": "system", "content": "You are a professional knowledge graph expert."},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.7
+            "temperature": 0.2
         }
 
         for attempt in range(max_retries):
@@ -214,10 +273,12 @@ class KnowledgeGraphGenerator:
     async def expand_entity(self, entity: str) -> List[Quad]:
         """扩展单个实体，返回四元组列表"""
         if entity in self.visited_entities:
+            print(f'entity: {entity} 已经visited，不进行expand')
             return []
 
         # 如果实体已被标记为停止传播，直接返回
         if entity in self.propagation_stopped:
+            print(f'entity: {entity} 已经是propagated，不进行expand')
             return []
 
         try:
@@ -225,10 +286,7 @@ class KnowledgeGraphGenerator:
             response = await self.call_llm_api(self.generate_expansion_prompt(entity))
             data = json.loads(response)
 
-            should_stop = (
-                    not data["is_ai_related"] or
-                    (not data.get("should_propagate", True) and data.get("confidence", 0) >= 0.6)
-            )
+            should_stop = (not data["is_ai_related"])
 
             if should_stop:
                 print(f"Entity {entity} is not AI-related")
@@ -271,15 +329,13 @@ class KnowledgeGraphGenerator:
             return []
 
     async def build_knowledge_graph(
-        self,
-        seed_entities: List[str],
-        max_entities: int = 100
+            self,
+            seed_entities: List[str],
+            max_entities: int
     ) -> nx.MultiDiGraph:
         """从种子实体开始构建知识图谱"""
-        # 添加新的种子实体
-        for entity in seed_entities:
-            if entity not in self.visited_entities and entity not in self.entity_queue:
-                self.entity_queue.append(entity)
+        # 直接将种子实体加入队列
+        self.entity_queue.extend(seed_entities)
 
         with tqdm(total=max_entities) as pbar:
             while self.entity_queue and len(self.visited_entities) < max_entities:
@@ -398,8 +454,8 @@ class KnowledgeGraphGenerator:
             ],
             "metadata": {
                 "num_entities": len(self.graph.nodes()),
-                "num_relations": len([e for e in self.graph.edges(data=True) if e[3]["type"] == "relation"]),
-                "num_attributes": len([e for e in self.graph.edges(data=True) if e[3]["type"] == "attribute"]),
+                "num_relations": len([e for e in self.graph.edges(keys=True, data=True) if e[3]["type"] == "relation"]),
+                "num_attributes": len([e for e in self.graph.edges(keys=True, data=True) if e[3]["type"] == "attribute"]),
                 "relation_types": list(self.relation_types),
                 "attribute_types": list(self.attribute_types),
                 "propagation_stopped_entities": list(self.propagation_stopped),
@@ -500,6 +556,19 @@ class KnowledgeGraphAnalyzer:
 
 
 async def main(args):
+
+    def verify_graph_edges(graph: nx.MultiDiGraph):
+        for idx, edge in enumerate(graph.edges(keys=True, data=True)):
+            if len(edge) != 4:
+                print(f"边 {idx} 的结构不正确: {edge}")
+            else:
+                u, v, k, data = edge
+                # 检查是否包含必要的键
+                required_keys = ["relation", "type"]
+                missing_keys = [key for key in required_keys if key not in data]
+                if missing_keys:
+                    print(f"边 {idx} 缺少键 {missing_keys}: {edge}")
+
     try:
         kg_generator = KnowledgeGraphGenerator(
             api_key=args.api_key,
@@ -508,29 +577,34 @@ async def main(args):
         )
 
         seed_entities = args.seed_entities if args.seed_entities else []
-        print("Starting knowledge graph construction")
+        print("开始构建知识图谱")
         await kg_generator.build_knowledge_graph(
             seed_entities=seed_entities,
             max_entities=args.max_entities
         )
 
+        # 验证图中边的结构和数据完整性
+        verify_graph_edges(kg_generator.graph)
+
         kg_generator.save_results(f"results/{args.state_file_prefix}")
 
         analyzer = KnowledgeGraphAnalyzer(kg_generator.graph)
         stats = analyzer.get_statistics()
-        print("\nKnowledge Graph Statistics:")
+        print("\n知识图谱统计信息:")
         print(json.dumps(stats, ensure_ascii=False, indent=2))
 
     except Exception as e:
-        print(f"Error: {str(e)}")
-
+        import traceback
+        print(f"错误: {str(e)}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Knowledge Graph Generator")
-    parser.add_argument('--api_key', required=True,type=str, help='OpenAI API key')
+    parser.add_argument('--api_key', required=True, type=str, help='OpenAI API key')
     parser.add_argument('--load_from_state', action='store_true', help='Load from saved state')
     parser.add_argument('--state_file_prefix', type=str, default='kg_state', help='State file prefix')
-    parser.add_argument('--seed_entities', default=['机器学习', '自然语言处理', '计算机视觉', '深度学习'] , nargs='*', help='List of seed entities')
+    parser.add_argument('--seed_entities', default=['机器学习', '自然语言处理', '计算机视觉', '深度学习'], nargs='*',
+                        help='List of seed entities')
     parser.add_argument('--max_entities', type=int, default=10, help='Maximum number of entities')
 
     args = parser.parse_args()

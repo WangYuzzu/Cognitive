@@ -1,16 +1,14 @@
-# KG_construction_NoURL.py
-from typing import List, Dict, Set, Optional
-from dataclasses import dataclass
+import argparse
+import os
+import asyncio
 import json
 import networkx as nx
+from typing import List, Dict, Set, Optional
+from dataclasses import dataclass
 from collections import deque
-import asyncio
-
 from tqdm import tqdm
-from openai import OpenAI
+import openai
 import time
-
-
 
 @dataclass
 class Quad:
@@ -20,29 +18,34 @@ class Quad:
     tail: str
     quad_type: str  # "R" for relation, "A" for attribute
 
-
 class KnowledgeGraphGenerator:
-    def __init__(self, api_key: str):
-        # 使用NetworkX存储图谱
+    def __init__(
+        self,
+        api_key: str,
+        load_from_state: bool = False,
+        state_file_prefix: str = 'kg_state'
+    ):
+        # 初始化变量
         self.graph = nx.MultiDiGraph()
-        # 存储已访问的实体
         self.visited_entities = set()
-        # 待访问的实体队列
         self.entity_queue = deque()
-        # 记录所有关系类型
         self.relation_types = set()
-        # 记录所有属性类型
         self.attribute_types = set()
-        # 存储不需要继续传播的实体
         self.propagation_stopped = set()
-        # 存储已经分析过的实体
         self.analyzed_entities = set()
 
-        # API配置
-        self.client = OpenAI(api_key=api_key, base_url='https://api.gptapi.us/v1/chat/completions')
-        # 用于速率限制
+        # 配置 OpenAI
+        openai.api_key = api_key
+        self.model = "gpt-4"  # 或者您使用的其他模型
+
+        # 用于速率限制（可选，根据需要调整）
         self.last_request_time = 0
         self.min_request_interval = 1
+
+        # 如果需要，从保存的状态加载
+        if load_from_state:
+            self.load_graph(f'{state_file_prefix}_graph.json')
+            self.load_state(f'{state_file_prefix}_state.json')
 
     def generate_entity_analysis_prompt(self, entities: List[str]) -> str:
         """生成批量分析实体的prompt"""
@@ -105,13 +108,37 @@ class KnowledgeGraphGenerator:
         6. 实体名称要规范，避免同义词
         """
 
-    async def _wait_for_rate_limit(self):
-        """实现简单的速率限制"""
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
-        if time_since_last_request < self.min_request_interval:
-            await asyncio.sleep(self.min_request_interval - time_since_last_request)
-        self.last_request_time = time.time()
+    def call_llm_api(self, prompt: str, max_retries: int = 3) -> Optional[str]:
+        """调用 OpenAI API 获取响应"""
+        for attempt in range(max_retries):
+            try:
+                # 简单的速率限制
+                current_time = time.time()
+                time_since_last_request = current_time - self.last_request_time
+                if time_since_last_request < self.min_request_interval:
+                    time.sleep(self.min_request_interval - time_since_last_request)
+                self.last_request_time = time.time()
+
+                response = openai.ChatCompletion.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "You are a professional knowledge graph expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7
+                )
+
+                content = response['choices'][0]['message']['content']
+                return self._extract_json_from_text(content)
+
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    print(f"API failed after {max_retries} attempts")
+                    return None
+        return None
 
     @staticmethod
     def _extract_json_from_text(text: str) -> str:
@@ -125,41 +152,7 @@ class KnowledgeGraphGenerator:
             return text[start:end + 1]
         raise ValueError("No valid JSON found in response")
 
-    async def call_llm_api(self, prompt: str, max_retries: int = 3) -> Optional[str]:
-        """使用openai库调用API"""
-        data = {
-            "model": "gpt-4",
-            "messages": [
-                {"role": "system", "content": "You are a professional knowledge graph expert."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.7
-        }
-
-        for attempt in range(max_retries):
-            try:
-                await self._wait_for_rate_limit()
-
-                # 新版本OpenAI库
-                response = self.client.chat.completions.create(**data)
-                content = response.choices[0].message.content
-
-                # 或者旧版本
-                # response = await openai.ChatCompletion.create(**data)
-                # content = response['choices'][0]['message']['content']
-
-                return self._extract_json_from_text(content)
-
-            except Exception as e:
-                print(f"Attempt {attempt + 1} failed: {str(e)}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                else:
-                    raise e
-
-        return None
-
-    async def analyze_entities(self, entities: List[str]) -> Dict[str, bool]:
+    def analyze_entities(self, entities: List[str]) -> Dict[str, bool]:
         """批量分析实体，返回是否需要停止传播的字典"""
         # 过滤掉已分析的实体
         entities_to_analyze = [e for e in entities if e not in self.analyzed_entities]
@@ -167,12 +160,13 @@ class KnowledgeGraphGenerator:
             return {}
 
         try:
-            # 批量调用API分析实体
-            response = await self.call_llm_api(
+            # 调用API分析实体
+            response = self.call_llm_api(
                 self.generate_entity_analysis_prompt(entities_to_analyze)
             )
+            if not response:
+                return {}
             data = json.loads(response)
-            print(f'批量分析: {data}')
 
             results = {}
             for analysis in data["entity_analysis"]:
@@ -196,7 +190,7 @@ class KnowledgeGraphGenerator:
             print(f"Error analyzing entities: {str(e)}")
             return {}
 
-    async def expand_entity(self, entity: str) -> List[Quad]:
+    def expand_entity(self, entity: str) -> List[Quad]:
         """扩展单个实体，返回四元组列表"""
         if entity in self.visited_entities:
             return []
@@ -206,8 +200,10 @@ class KnowledgeGraphGenerator:
             return []
 
         try:
-            # 调用LLM API
-            response = await self.call_llm_api(self.generate_expansion_prompt(entity))
+            # 调用API
+            response = self.call_llm_api(self.generate_expansion_prompt(entity))
+            if not response:
+                return []
             data = json.loads(response)
 
             if not data["is_ai_related"]:
@@ -235,13 +231,13 @@ class KnowledgeGraphGenerator:
 
             # 批量分析新实体
             if new_entities:
-                propagation_results = await self.analyze_entities(list(new_entities))
+                propagation_results = self.analyze_entities(list(new_entities))
 
                 # 将可以传播的实体加入队列
-                for entity in new_entities:
-                    if not propagation_results.get(entity, False):  # False表示不需要停止传播
-                        if entity not in self.visited_entities:
-                            self.entity_queue.append(entity)
+                for ent in new_entities:
+                    if not propagation_results.get(ent, False):  # False表示不需要停止传播
+                        if ent not in self.visited_entities and ent not in self.entity_queue:
+                            self.entity_queue.append(ent)
 
             self.visited_entities.add(entity)
             return quads
@@ -250,16 +246,23 @@ class KnowledgeGraphGenerator:
             print(f"Error expanding entity {entity}: {str(e)}")
             return []
 
-    async def build_knowledge_graph(self, seed_entity: str, max_entities: int = 10) -> nx.MultiDiGraph:
+    def build_knowledge_graph(
+        self,
+        seed_entities: List[str],
+        max_entities: int = 100
+    ) -> nx.MultiDiGraph:
         """从种子实体开始构建知识图谱"""
-        self.entity_queue.append(seed_entity)
+        # 添加新的种子实体
+        for entity in seed_entities:
+            if entity not in self.visited_entities and entity not in self.entity_queue:
+                self.entity_queue.append(entity)
 
         with tqdm(total=max_entities) as pbar:
             while self.entity_queue and len(self.visited_entities) < max_entities:
                 current_entity = self.entity_queue.popleft()
                 print(f"\nProcessing entity: {current_entity}")
 
-                quads = await self.expand_entity(current_entity)
+                quads = self.expand_entity(current_entity)
                 if quads:
                     print(f"Found {len(quads)} quads:")
                     for quad in quads:
@@ -284,16 +287,21 @@ class KnowledgeGraphGenerator:
         """将四元组添加到图中"""
         for quad in quads:
             if quad.quad_type == "R":  # 关系类型
-                self.graph.add_edge(
-                    quad.head,
-                    quad.tail,
-                    relation=quad.relation,
-                    type="relation"
-                )
+                # 检查是否已存在相同的边
+                if not self.graph.has_edge(quad.head, quad.tail, key=quad.relation):
+                    self.graph.add_edge(
+                        quad.head,
+                        quad.tail,
+                        key=quad.relation,
+                        relation=quad.relation,
+                        type="relation"
+                    )
             else:  # 属性类型
+                # 属性作为自循环边，或者使用节点属性
                 self.graph.add_edge(
                     quad.head,
                     quad.tail,
+                    key=quad.relation,
                     relation=quad.relation,
                     type="attribute",
                     value=quad.tail
@@ -304,6 +312,10 @@ class KnowledgeGraphGenerator:
         # 保存图谱数据
         graph_file = f"{output_file_prefix}_graph.json"
         self.export_graph(graph_file)
+
+        # 保存状态
+        state_file = f"{output_file_prefix}_state.json"
+        self.save_state(state_file)
 
         # 保存统计信息
         stats_file = f"{output_file_prefix}_stats.json"
@@ -341,6 +353,7 @@ class KnowledgeGraphGenerator:
 
         print(f"\nResults saved:")
         print(f"- Graph: {graph_file}")
+        print(f"- State: {state_file}")
         print(f"- Stats: {stats_file}")
         print(f"- Details: {details_file}")
 
@@ -354,14 +367,15 @@ class KnowledgeGraphGenerator:
                     "target": v,
                     "relation": data["relation"],
                     "type": data["type"],
-                    "value": data.get("value", None)
+                    "value": data.get("value", None),
+                    "key": k
                 }
-                for u, v, data in self.graph.edges(data=True)
+                for u, v, k, data in self.graph.edges(keys=True, data=True)
             ],
             "metadata": {
                 "num_entities": len(self.graph.nodes()),
-                "num_relations": len([e for e in self.graph.edges(data=True) if e[2]["type"] == "relation"]),
-                "num_attributes": len([e for e in self.graph.edges(data=True) if e[2]["type"] == "attribute"]),
+                "num_relations": len([e for e in self.graph.edges(data=True, keys=True) if e[3]["type"] == "relation"]),
+                "num_attributes": len([e for e in self.graph.edges(data=True, keys=True) if e[3]["type"] == "attribute"]),
                 "relation_types": list(self.relation_types),
                 "attribute_types": list(self.attribute_types),
                 "propagation_stopped_entities": list(self.propagation_stopped),
@@ -372,6 +386,48 @@ class KnowledgeGraphGenerator:
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(graph_data, f, ensure_ascii=False, indent=2)
 
+    def save_state(self, state_file: str):
+        """保存内部状态"""
+        state_data = {
+            'visited_entities': list(self.visited_entities),
+            'entity_queue': list(self.entity_queue),
+            'relation_types': list(self.relation_types),
+            'attribute_types': list(self.attribute_types),
+            'propagation_stopped': list(self.propagation_stopped),
+            'analyzed_entities': list(self.analyzed_entities)
+        }
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state_data, f, ensure_ascii=False, indent=2)
+
+    def load_state(self, state_file: str):
+        """加载内部状态"""
+        with open(state_file, 'r', encoding='utf-8') as f:
+            state_data = json.load(f)
+        self.visited_entities = set(state_data['visited_entities'])
+        self.entity_queue = deque(state_data['entity_queue'])
+        self.relation_types = set(state_data['relation_types'])
+        self.attribute_types = set(state_data['attribute_types'])
+        self.propagation_stopped = set(state_data['propagation_stopped'])
+        self.analyzed_entities = set(state_data['analyzed_entities'])
+
+    def load_graph(self, graph_file: str):
+        """加载图谱"""
+        with open(graph_file, 'r', encoding='utf-8') as f:
+            graph_data = json.load(f)
+        self.graph = nx.MultiDiGraph()
+        self.graph.add_nodes_from(graph_data['nodes'])
+        for edge in graph_data['edges']:
+            self.graph.add_edge(
+                edge['source'],
+                edge['target'],
+                key=edge['key'],
+                relation=edge['relation'],
+                type=edge['type'],
+                value=edge.get('value')
+            )
+        # 更新元数据
+        self.relation_types = set(graph_data['metadata']['relation_types'])
+        self.attribute_types = set(graph_data['metadata']['attribute_types'])
 
 class KnowledgeGraphAnalyzer:
     """分析知识图谱的工具类"""
@@ -381,8 +437,8 @@ class KnowledgeGraphAnalyzer:
 
     def get_statistics(self) -> Dict:
         """获取图谱统计信息"""
-        relation_edges = [e for e in self.graph.edges(data=True) if e[2]["type"] == "relation"]
-        attribute_edges = [e for e in self.graph.edges(data=True) if e[2]["type"] == "attribute"]
+        relation_edges = [e for e in self.graph.edges(data=True, keys=True) if e[3]["type"] == "relation"]
+        attribute_edges = [e for e in self.graph.edges(data=True, keys=True) if e[3]["type"] == "attribute"]
 
         return {
             "total_entities": len(self.graph.nodes()),
@@ -396,7 +452,7 @@ class KnowledgeGraphAnalyzer:
     def _get_relation_distribution(self, relation_edges) -> Dict:
         """获取关系类型分布"""
         distribution = {}
-        for _, _, data in relation_edges:
+        for _, _, _, data in relation_edges:
             relation = data["relation"]
             distribution[relation] = distribution.get(relation, 0) + 1
         return distribution
@@ -417,28 +473,103 @@ class KnowledgeGraphAnalyzer:
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return []
 
+def generate_entity_analysis_prompt(entities: List[str]) -> str:
+    """生成批量分析实体的prompt"""
+    return f"""作为AI领域的专家，请分析以下概念：{', '.join(entities)}
 
-async def main():
-    try:
-        api_key = "sk-cjCCsuM7YinkB5dc95BeB9A4C3F443C4B5535bE5EcFdBe4f"
-        # My api: sk-bCY6IwFu0nbiaRTF528e01387bFf4c3eB2E224B6201129A5
-        # Ly api: sk-cjCCsuM7YinkB5dc95BeB9A4C3F443C4B5535bE5EcFdBe4f
-        kg_generator = KnowledgeGraphGenerator(api_key)
-        print("Starting knowledge graph construction from seed entity: 机器学习")
-        graph = await kg_generator.build_knowledge_graph(
-            seed_entity="机器学习",
-            max_entities=100
-        )
+    对每个概念进行分析，包括：
+    1. 领域关联度分析
+    2. 概念粒度分析
+    3. 传播必要性分析
 
-        kg_generator.save_results("results/machine_learning_kg_1")
+    请按如下JSON格式返回：
+    {{
+        "entity_analysis": [
+            {{
+                "entity": "概念名称",
+                "is_ai_related": true/false,
+                "relation_level": "strong/medium/weak",
+                "granularity": "category/subdomain/technique/detail",
+                "should_propagate": true/false",
+                "stop_reason": "如果should_propagate为false，给出原因",
+                "confidence": <0-1的置信度>
+            }},
+            ...
+        ]
+    }}"""
 
-        analyzer = KnowledgeGraphAnalyzer(graph)
-        stats = analyzer.get_statistics()
-        print("\nKnowledge Graph Statistics:")
-        print(json.dumps(stats, ensure_ascii=False, indent=2))
+def generate_expansion_prompt(entity: str) -> str:
+    """生成用于实体扩展的prompt"""
+    return f"""你是一名专业的知识图谱从业者，针对关键词实体: {entity}，请你：
 
-    except Exception as e:
-        print(f"Error: {str(e)}")
+    1. 首先判断这个词是否与人工智能领域存在强关联，如果不存在，则输出："不属于人工智能领域"
+
+    2. 如果属于人工智能领域，请生成一系列四元组：
+       - 格式为<实体, 关系, 实体, R>或<实体, 属性, 属性值, A>
+       - 主实体必须是"{entity}"
+       - 关联实体必须与AI领域相关
+       - 关系要表达实体间的语义联系
+       - 属性要表达实体的内在特性
+
+    请严格按照以下JSON格式返回，不要包含任何其他内容：
+    {{
+        "is_ai_related": true/false,
+        "quads": [
+            {{
+                "head": "{entity}",
+                "relation": "关系名称",
+                "tail": "关联实体/属性值",
+                "type": "R/A"
+            }},
+            ...
+        ]
+    }}
+
+    要求：
+    1. 关系要准确具体
+    2. 关联实体要在合适的粒度级别
+    3. 每个实体生成8-12个四元组
+    4. 优先生成与其他AI概念的关系
+    5. 关系描述要简洁，通常2-4个字
+    6. 实体名称要规范，避免同义词
+    """
+
+def main():
+    parser = argparse.ArgumentParser(description="Knowledge Graph Generator")
+    parser.add_argument('--api_key', type=str, required=True, help='OpenAI API key')
+    parser.add_argument('--load_from_state', action='store_true', help='Load from saved state')
+    parser.add_argument('--state_file_prefix', type=str, default='kg_state', help='State file prefix')
+    parser.add_argument('--seed_entities', nargs='*', default=['机器学习', '自然语言处理', '计算机视觉', '深度学习'], help='List of seed entities')
+    parser.add_argument('--max_entities', type=int, default=10, help='Maximum number of entities')
+
+    args = parser.parse_args()
+
+    # 从命令行参数或环境变量获取 API 密钥
+    api_key = args.api_key or os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        raise ValueError("API key is required. Please provide it via --api_key argument or set the OPENAI_API_KEY environment variable.")
+
+    kg_generator = KnowledgeGraphGenerator(
+        api_key=api_key,
+        load_from_state=args.load_from_state,
+        state_file_prefix=args.state_file_prefix
+    )
+
+    seed_entities = args.seed_entities
+    print("Starting knowledge graph construction")
+    kg_generator.build_knowledge_graph(
+        seed_entities=seed_entities,
+        max_entities=args.max_entities
+    )
+
+    kg_generator.save_results(f"results/{args.state_file_prefix}")
+
+    analyzer = KnowledgeGraphAnalyzer(kg_generator.graph)
+    stats = analyzer.get_statistics()
+    print("\nKnowledge Graph Statistics:")
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 创建结果目录
+    os.makedirs('results', exist_ok=True)
+    main()
