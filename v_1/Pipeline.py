@@ -99,7 +99,7 @@ class KnowledgeFlow:
 # 测试主流程
 def main():
     # 配置
-    api_key = "sk-bCY6IwFu0nbiaRTF528e01387bFf4c3eB2E224B6201129A5"
+    api_key = ""
     evaluated_knowledge_file = "../results/evaluated_knowledge_points.json"
 
     # 初始化
